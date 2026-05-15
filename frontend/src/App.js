@@ -32,36 +32,69 @@ const getBookingForName = (bookings, name) => {
   );
 };
 
+const getBookingsByBed = (bookings) => {
+  if (!Array.isArray(bookings)) return {};
+
+  return bookings.reduce((bookingsByBed, booking) => {
+    if (
+      typeof booking.bedSlug === "string" &&
+      booking.bedSlug &&
+      typeof booking.name === "string" &&
+      booking.name
+    ) {
+      bookingsByBed[booking.bedSlug] = booking.name;
+    }
+
+    return bookingsByBed;
+  }, {});
+};
+
 function App() {
   const [floor, setFloor] = useState(1);
   const [nameInput, setNameInput] = useState("");
   const [guestName, setGuestName] = useState("");
   const [occupiedBeds, setOccupiedBeds] = useState([]);
+  const [bookingsByBed, setBookingsByBed] = useState({});
   const [selectedBed, setSelectedBed] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const svgRef = useRef(null);
 
-  const markBedOccupied = useCallback((bedSlug) => {
+  const markBedOccupied = useCallback((bedSlug, name) => {
     setOccupiedBeds((currentBeds) => [
       ...new Set([...currentBeds, bedSlug]),
     ]);
+
+    if (name) {
+      setBookingsByBed((currentBookings) => ({
+        ...currentBookings,
+        [bedSlug]: name,
+      }));
+    }
   }, []);
 
   const markBedAvailable = useCallback((bedSlug) => {
     setOccupiedBeds((currentBeds) =>
       currentBeds.filter((currentBed) => currentBed !== bedSlug),
     );
+    setBookingsByBed((currentBookings) => {
+      const nextBookings = { ...currentBookings };
+      delete nextBookings[bedSlug];
+      return nextBookings;
+    });
     setSelectedBed((currentBed) => (currentBed === bedSlug ? "" : currentBed));
   }, []);
 
   const applyBookings = useCallback(
     (bookings) => {
       setOccupiedBeds(getOccupiedBedSlugs(bookings));
+      setBookingsByBed(getBookingsByBed(bookings));
 
       const booking = getBookingForName(bookings, guestName);
 
       if (booking?.bedSlug) {
         setSelectedBed(booking.bedSlug);
+      } else {
+        setSelectedBed("");
       }
     },
     [guestName],
@@ -96,9 +129,40 @@ function App() {
       rect.setAttribute("height", "500");
       rect.setAttribute("class", "bed-border");
 
-      bed.appendChild(rect);
+      if (!bed.querySelector(".bed-border")) {
+        bed.appendChild(rect);
+      }
+
+      if (!bed.querySelector(".bed-name")) {
+        const text = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "text",
+        );
+
+        text.setAttribute("x", "412.5");
+        text.setAttribute("y", "250");
+        text.setAttribute("class", "bed-name");
+
+        bed.appendChild(text);
+      }
     });
   }, []);
+
+  useEffect(() => {
+    const svg = svgRef.current;
+
+    if (!svg) return;
+
+    const beds = svg.querySelectorAll(".bed");
+
+    beds.forEach((bed) => {
+      const text = bed.querySelector(".bed-name");
+
+      if (!text) return;
+
+      text.textContent = bookingsByBed[bed.id] ?? "";
+    });
+  }, [bookingsByBed]);
 
   useEffect(() => {
     if (typeof fetch !== "function") return;
@@ -136,7 +200,7 @@ function App() {
         }
 
         if (data.type === "booking_created" && data.booking?.bedSlug) {
-          markBedOccupied(data.booking.bedSlug);
+          markBedOccupied(data.booking.bedSlug, data.booking.name);
         }
 
         if (data.type === "booking_deleted" && data.booking?.bedSlug) {
@@ -192,7 +256,7 @@ function App() {
         });
 
         if (response.ok) {
-          markBedOccupied(bed.id);
+          markBedOccupied(bed.id, guestName);
           setSelectedBed(bed.id);
           setErrorMessage("");
           return;
@@ -201,7 +265,7 @@ function App() {
         const data = await response.json();
 
         if (response.status === 409 && data.error === "Bed is already booked") {
-          markBedOccupied(bed.id);
+          markBedOccupied(bed.id, data.booking?.name);
         }
 
         setErrorMessage(data.error ?? "Could not book bed.");
@@ -280,6 +344,9 @@ ${occupiedBeds.map((x) => `#${x} use`).join(", ")} {
 ${occupiedBeds.map((x) => `#${x} .bed-border`).join(", ")} {
   display:none !important;
 }
+${occupiedBeds.map((x) => `#${x} .bed-name`).join(", ")} {
+  display: block;
+}
     `;
   }, [occupiedBeds]);
 
@@ -313,6 +380,20 @@ ${occupiedBeds.map((x) => `#${x} .bed-border`).join(", ")} {
   fill: black;
   stroke-dasharray: 0 0;
   cursor: pointer;
+}
+
+.bed-name {
+  display: none;
+  fill: white;
+  font-size: 80px;
+  font-weight: 700;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: black;
+  stroke-linejoin: round;
+  stroke-width: 18px;
+  text-anchor: middle;
+  dominant-baseline: middle;
 }
 
 ${occupiedBedStyles}
