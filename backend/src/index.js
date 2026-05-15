@@ -1,13 +1,17 @@
 import express from "express";
+import http from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import WebSocket, { WebSocketServer } from "ws";
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const bookingsFilePath = join(currentDir, "..", "data", "bookings.json");
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -42,14 +46,68 @@ const saveBookings = async (bookings) => {
   await writeFile(bookingsFilePath, `${JSON.stringify(bookings, null, 2)}\n`);
 };
 
-const normalizeNames = (body) => {
-  const incomingNames = body.names ?? body.name;
-  const names = Array.isArray(incomingNames) ? incomingNames : [incomingNames];
+const normalizeName = (body) => {
+  if (typeof body.name !== "string") {
+    return "";
+  }
 
-  return names
-    .filter((name) => typeof name === "string")
-    .map((name) => name.trim())
-    .filter(Boolean);
+  return body.name.trim();
+};
+
+const createBooking = async (body) => {
+  const name = normalizeName(body);
+  const bedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
+
+  if (!name) {
+    return {
+      statusCode: 400,
+      error: "Name is required"
+    };
+  }
+
+  if (!bedSlug) {
+    return {
+      statusCode: 400,
+      error: "Bed slug is required"
+    };
+  }
+
+  const bookings = await readBookings();
+  const bedIsAlreadyBooked = bookings.some((booking) => booking.bedSlug === bedSlug);
+
+  if (bedIsAlreadyBooked) {
+    return {
+      statusCode: 409,
+      error: "Bed is already booked"
+    };
+  }
+
+  const booking = {
+    name,
+    bedSlug
+  };
+
+  bookings.push(booking);
+  await saveBookings(bookings);
+
+  return {
+    statusCode: 201,
+    booking
+  };
+};
+
+const sendSocketMessage = (socket, message) => {
+  socket.send(JSON.stringify(message));
+};
+
+const broadcastSocketMessage = (message) => {
+  const payload = JSON.stringify(message);
+
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(payload);
+    }
+  }
 };
 
 app.get("/", (req, res) => {
@@ -77,45 +135,80 @@ app.get("/bookings", async (req, res, next) => {
 
 app.post("/bookings", async (req, res, next) => {
   try {
-    const names = normalizeNames(req.body);
-    const bedSlug = typeof req.body.slug === "string" ? req.body.slug.trim() : "";
+    const result = await createBooking(req.body);
 
-    if (names.length === 0) {
-      res.status(400).json({
-        error: "At least one name is required"
+    if (result.error) {
+      res.status(result.statusCode).json({
+        error: result.error
       });
       return;
     }
 
-    if (!bedSlug) {
-      res.status(400).json({
-        error: "Bed slug is required"
-      });
-      return;
-    }
+    broadcastSocketMessage({
+      type: "booking_created",
+      booking: result.booking
+    });
 
-    const bookings = await readBookings();
-    const existingBookingIndex = bookings.findIndex((booking) => booking.bedSlug === bedSlug);
-    const booking = {
-      names,
-      bedSlug,
-      createdAt: new Date().toISOString()
-    };
-
-    if (existingBookingIndex === -1) {
-      bookings.push(booking);
-    } else {
-      bookings[existingBookingIndex] = booking;
-    }
-
-    await saveBookings(bookings);
-
-    res.status(existingBookingIndex === -1 ? 201 : 200).json({
-      booking
+    res.status(result.statusCode).json({
+      booking: result.booking
     });
   } catch (error) {
     next(error);
   }
+});
+
+wss.on("connection", async (socket) => {
+  sendSocketMessage(socket, {
+    type: "connected"
+  });
+
+  try {
+    const bookings = await readBookings();
+    sendSocketMessage(socket, {
+      type: "bookings",
+      bookings
+    });
+  } catch (error) {
+    sendSocketMessage(socket, {
+      type: "error",
+      error: "Could not load bookings"
+    });
+  }
+
+  socket.on("message", async (message) => {
+    try {
+      const body = JSON.parse(message.toString());
+
+      if (body.type !== "book_bed") {
+        sendSocketMessage(socket, {
+          type: "error",
+          error: "Unknown message type"
+        });
+        return;
+      }
+
+      const result = await createBooking(body);
+
+      if (result.error) {
+        sendSocketMessage(socket, {
+          type: "booking_error",
+          statusCode: result.statusCode,
+          error: result.error
+        });
+        return;
+      }
+
+      broadcastSocketMessage({
+        type: "booking_created",
+        booking: result.booking
+      });
+    } catch (error) {
+      sendSocketMessage(socket, {
+        type: "error",
+        error: "Invalid message"
+      });
+    }
+  });
 });
 
 app.use((req, res) => {
@@ -131,6 +224,7 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
+  console.log(`WebSocket listening on ws://localhost:${port}`);
 });

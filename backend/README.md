@@ -23,18 +23,49 @@ The API will be available at `http://localhost:3000`.
 - `GET /bookings` returns saved bed bookings.
 - `POST /bookings` saves a bed booking.
 
-## Booking Payload
+## WebSocket
 
-Send a booking from the frontend like this:
+Connect to:
+
+```text
+ws://localhost:3000
+```
+
+Send this message to book a bed:
 
 ```json
 {
-  "names": ["Matej", "Jakob"],
+  "type": "book_bed",
+  "name": "Matej",
   "slug": "bed-1"
 }
 ```
 
-For one person, this also works:
+If the bed is free, every connected client receives:
+
+```json
+{
+  "type": "booking_created",
+  "booking": {
+    "name": "Matej",
+    "bedSlug": "bed-1"
+  }
+}
+```
+
+If the bed is already booked, the sender receives:
+
+```json
+{
+  "type": "booking_error",
+  "statusCode": 409,
+  "error": "Bed is already booked"
+}
+```
+
+## Booking Payload
+
+Send a booking from the frontend like this:
 
 ```json
 {
@@ -44,4 +75,4 @@ For one person, this also works:
 ```
 
 Bookings are saved locally to `data/bookings.json`.
-The `slug` is treated as the unique bed identifier. Sending another booking with the same `slug` updates that bed's saved names.
+The `slug` is treated as the unique bed identifier. Sending another booking with the same `slug` returns a `409` error because that bed is already booked.
