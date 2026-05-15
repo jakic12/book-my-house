@@ -1,0 +1,20 @@
+{
+  "name": "book-my-house-backend",
+  "version": "1.0.0",
+  "description": "Basic Node.js backend starter.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  }
+}
