@@ -4,11 +4,34 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FaLongArrowAltDown, FaLongArrowAltUp } from "react-icons/fa";
 import classNames from "classnames";
 
-const API_URL = (process.env.REACT_APP_API_URL ?? "http://localhost:3001").replace(
-  /\/$/,
-  "",
-);
+const getDefaultApiUrl = () => {
+  if (typeof window === "undefined") {
+    return "http://localhost:3001";
+  }
+
+  return `${window.location.protocol}//${window.location.hostname}:3001`;
+};
+
+const API_URL = (process.env.REACT_APP_API_URL ?? getDefaultApiUrl()).replace(/\/$/, "");
 const WS_URL = API_URL.replace(/^http/, "ws");
+const MIN_MAP_SCALE = 0.5;
+const BASE_MAP_SCALE = 1;
+const MAX_MAP_SCALE = 40;
+const MAP_WIDTH = 3508;
+const MAP_HEIGHT = 4961;
+const MAP_DEFAULT_CENTER_X = 1656;
+const MAP_DEFAULT_CENTER_Y = 1210;
+const DRAG_CLICK_THRESHOLD = 5;
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const getPointerDistance = ([firstPointer, secondPointer]) =>
+  Math.hypot(firstPointer.x - secondPointer.x, firstPointer.y - secondPointer.y);
+
+const getPointerMidpoint = ([firstPointer, secondPointer]) => ({
+  x: (firstPointer.x + secondPointer.x) / 2,
+  y: (firstPointer.y + secondPointer.y) / 2,
+});
 
 const getOccupiedBedSlugs = (bookings) => {
   if (!Array.isArray(bookings)) return [];
@@ -57,7 +80,56 @@ function App() {
   const [bookingsByBed, setBookingsByBed] = useState({});
   const [selectedBed, setSelectedBed] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [nameErrorMessage, setNameErrorMessage] = useState("");
+  const [mapTransform, setMapTransform] = useState({
+    scale: BASE_MAP_SCALE,
+    x: 0,
+    y: 0,
+  });
   const svgRef = useRef(null);
+  const mapViewportRef = useRef(null);
+  const mapTransformRef = useRef(mapTransform);
+  const activePointersRef = useRef(new Map());
+  const dragRef = useRef({
+    isDragging: false,
+    moved: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    startMapX: 0,
+    startMapY: 0,
+  });
+  const pinchRef = useRef({
+    isPinching: false,
+    moved: false,
+    startDistance: 0,
+    startMidpointX: 0,
+    startMidpointY: 0,
+    startMapX: 0,
+    startMapY: 0,
+    startScale: BASE_MAP_SCALE,
+  });
+  const ignoreNextClickRef = useRef(false);
+
+  const getCenteredMapTransform = useCallback(() => {
+    const viewport = mapViewportRef.current;
+
+    if (!viewport) {
+      return {
+        scale: BASE_MAP_SCALE,
+        x: 0,
+        y: 0,
+      };
+    }
+
+    const rect = viewport.getBoundingClientRect();
+
+    return {
+      scale: BASE_MAP_SCALE,
+      x: rect.width / 2 - MAP_DEFAULT_CENTER_X * BASE_MAP_SCALE,
+      y: rect.height / 2 - MAP_DEFAULT_CENTER_Y * BASE_MAP_SCALE,
+    };
+  }, []);
 
   const markBedOccupied = useCallback((bedSlug, name) => {
     setOccupiedBeds((currentBeds) => [
@@ -149,6 +221,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setMapTransform(getCenteredMapTransform());
+  }, [getCenteredMapTransform]);
+
+  useEffect(() => {
+    mapTransformRef.current = mapTransform;
+  }, [mapTransform]);
+
+  useEffect(() => {
     const svg = svgRef.current;
 
     if (!svg) return;
@@ -218,6 +298,11 @@ function App() {
 
   const bookBed = useCallback(
     async (event) => {
+      if (ignoreNextClickRef.current) {
+        ignoreNextClickRef.current = false;
+        return;
+      }
+
       const bed = event.target.closest(".bed");
 
       if (!bed?.id) return;
@@ -277,6 +362,194 @@ function App() {
     [guestName, markBedOccupied, occupiedBeds, selectedBed],
   );
 
+  const startMapDrag = useCallback(
+    (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+
+      const viewport = mapViewportRef.current;
+
+      if (!viewport) return;
+
+      const rect = viewport.getBoundingClientRect();
+
+      activePointersRef.current.set(event.pointerId, {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      });
+
+      if (activePointersRef.current.size >= 2) {
+        const pointers = [...activePointersRef.current.values()].slice(0, 2);
+        const midpoint = getPointerMidpoint(pointers);
+        const currentTransform = mapTransformRef.current;
+
+        pinchRef.current = {
+          isPinching: true,
+          moved: false,
+          startDistance: getPointerDistance(pointers),
+          startMidpointX: midpoint.x,
+          startMidpointY: midpoint.y,
+          startMapX: currentTransform.x,
+          startMapY: currentTransform.y,
+          startScale: currentTransform.scale,
+        };
+
+        dragRef.current = {
+          ...dragRef.current,
+          isDragging: false,
+          pointerId: null,
+        };
+        return;
+      }
+
+      const currentTransform = mapTransformRef.current;
+
+      dragRef.current = {
+        isDragging: true,
+        moved: false,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startMapX: currentTransform.x,
+        startMapY: currentTransform.y,
+      };
+    },
+    [],
+  );
+
+  const moveMap = useCallback((event) => {
+    if (activePointersRef.current.has(event.pointerId)) {
+      const viewport = mapViewportRef.current;
+
+      if (!viewport) return;
+
+      const rect = viewport.getBoundingClientRect();
+
+      activePointersRef.current.set(event.pointerId, {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      });
+    }
+
+    if (activePointersRef.current.size >= 2 && pinchRef.current.isPinching) {
+      const pointers = [...activePointersRef.current.values()].slice(0, 2);
+      const midpoint = getPointerMidpoint(pointers);
+      const distance = getPointerDistance(pointers);
+      const pinch = pinchRef.current;
+
+      if (pinch.startDistance === 0) return;
+
+      const scaleRatio = distance / pinch.startDistance;
+      const nextScale = clamp(
+        pinch.startScale * scaleRatio,
+        MIN_MAP_SCALE,
+        MAX_MAP_SCALE,
+      );
+      const clampedScaleRatio = nextScale / pinch.startScale;
+
+      if (
+        Math.abs(distance - pinch.startDistance) > DRAG_CLICK_THRESHOLD ||
+        Math.hypot(
+          midpoint.x - pinch.startMidpointX,
+          midpoint.y - pinch.startMidpointY,
+        ) > DRAG_CLICK_THRESHOLD
+      ) {
+        pinch.moved = true;
+      }
+
+      setMapTransform({
+        scale: nextScale,
+        x:
+          midpoint.x -
+          (pinch.startMidpointX - pinch.startMapX) * clampedScaleRatio,
+        y:
+          midpoint.y -
+          (pinch.startMidpointY - pinch.startMapY) * clampedScaleRatio,
+      });
+      return;
+    }
+
+    const drag = dragRef.current;
+
+    if (!drag.isDragging || drag.pointerId !== event.pointerId) return;
+
+    const nextX = drag.startMapX + event.clientX - drag.startX;
+    const nextY = drag.startMapY + event.clientY - drag.startY;
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+
+    if (distance > DRAG_CLICK_THRESHOLD) {
+      drag.moved = true;
+    }
+
+    setMapTransform((currentTransform) => ({
+      ...currentTransform,
+      x: nextX,
+      y: nextY,
+    }));
+  }, []);
+
+  const stopMapDrag = useCallback((event) => {
+    activePointersRef.current.delete(event.pointerId);
+
+    if (pinchRef.current.isPinching) {
+      ignoreNextClickRef.current = true;
+      pinchRef.current = {
+        ...pinchRef.current,
+        isPinching: false,
+      };
+      dragRef.current = {
+        ...dragRef.current,
+        isDragging: false,
+        pointerId: null,
+      };
+
+      return;
+    }
+
+    const drag = dragRef.current;
+
+    if (!drag.isDragging || drag.pointerId !== event.pointerId) return;
+
+    ignoreNextClickRef.current = drag.moved;
+
+    dragRef.current = {
+      ...drag,
+      isDragging: false,
+      pointerId: null,
+    };
+  }, []);
+
+  const zoomMap = useCallback((event) => {
+    event.preventDefault();
+
+    const viewport = mapViewportRef.current;
+
+    if (!viewport) return;
+
+    const rect = viewport.getBoundingClientRect();
+    const cursorX = event.clientX - rect.left;
+    const cursorY = event.clientY - rect.top;
+    const zoomFactor = event.deltaY < 0 ? 1.12 : 0.88;
+
+    setMapTransform((currentTransform) => {
+      const nextScale = clamp(
+        currentTransform.scale * zoomFactor,
+        MIN_MAP_SCALE,
+        MAX_MAP_SCALE,
+      );
+      const scaleRatio = nextScale / currentTransform.scale;
+
+      return {
+        scale: nextScale,
+        x: cursorX - (cursorX - currentTransform.x) * scaleRatio,
+        y: cursorY - (cursorY - currentTransform.y) * scaleRatio,
+      };
+    });
+  }, []);
+
+  const resetMapTransform = useCallback(() => {
+    setMapTransform(getCenteredMapTransform());
+  }, [getCenteredMapTransform]);
+
   const saveGuestName = useCallback(
     (event) => {
       event.preventDefault();
@@ -284,11 +557,12 @@ function App() {
       const trimmedName = nameInput.trim();
 
       if (!trimmedName) {
-        setErrorMessage("Name is required before booking a bed.");
+        setNameErrorMessage("Name is required before booking a bed.");
         return;
       }
 
       setGuestName(trimmedName);
+      setNameErrorMessage("");
       setErrorMessage("");
     },
     [nameInput],
@@ -353,6 +627,11 @@ ${occupiedBeds.map((x) => `#${x} .bed-name`).join(", ")} {
   return (
     <div className="App">
       <style>{`
+.App {
+  min-height: 100vh;
+  overflow: hidden;
+}
+
 .lvl-2 {
   ${floor === 2 ? "" : "display: none;"}
 }
@@ -454,30 +733,76 @@ ${occupiedBedStyles}
           {errorMessage}
         </div>
       )}
-      {!guestName && (
-        <form
-          className="mx-6 mt-4 flex items-center gap-3 rounded border border-gray-200 bg-white px-4 py-3 shadow-sm"
-          onSubmit={saveGuestName}
+      <div
+        className="relative h-[calc(100vh-104px)] overflow-hidden bg-gray-50 touch-none"
+        onPointerDown={startMapDrag}
+        onPointerMove={moveMap}
+        onPointerUp={stopMapDrag}
+        onPointerCancel={stopMapDrag}
+        onWheel={zoomMap}
+        ref={mapViewportRef}
+      >
+        <div
+          className="absolute left-0 top-0 origin-top-left"
+          style={{
+            transform: `translate(${mapTransform.x}px, ${mapTransform.y}px) scale(${mapTransform.scale})`,
+          }}
         >
-          <label className="text-sm font-medium text-gray-700" htmlFor="guest-name">
-            Name
-          </label>
-          <input
-            id="guest-name"
-            className="min-w-0 flex-1 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-500"
-            value={nameInput}
-            onChange={(event) => setNameInput(event.target.value)}
-            autoFocus
+          <HisaSvg
+            ref={svgRef}
+            className="spinner"
+            onClick={bookBed}
+            style={{
+              display: "block",
+              height: `${MAP_HEIGHT}px`,
+              width: `${MAP_WIDTH}px`,
+            }}
           />
-          <button
-            className="rounded bg-gray-900 px-4 py-2 text-sm font-semibold text-white"
-            type="submit"
+        </div>
+        <button
+          className="absolute bottom-4 right-4 rounded bg-white px-3 py-2 text-sm font-semibold text-gray-700 shadow"
+          onClick={resetMapTransform}
+          type="button"
+        >
+          Reset view
+        </button>
+      </div>
+      {!guestName && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+          <form
+            className="w-full max-w-sm rounded bg-white p-5 text-left shadow-xl"
+            onSubmit={saveGuestName}
           >
-            Start
-          </button>
-        </form>
+            <label
+              className="mb-2 block text-sm font-semibold text-gray-700"
+              htmlFor="guest-name"
+            >
+              Name
+            </label>
+            <input
+              id="guest-name"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-600"
+              value={nameInput}
+              onChange={(event) => {
+                setNameInput(event.target.value);
+                setNameErrorMessage("");
+              }}
+              autoFocus
+            />
+            {nameErrorMessage && (
+              <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+                {nameErrorMessage}
+              </div>
+            )}
+            <button
+              className="mt-4 w-full rounded bg-gray-900 px-4 py-2 text-sm font-semibold text-white"
+              type="submit"
+            >
+              Start
+            </button>
+          </form>
+        </div>
       )}
-      <HisaSvg ref={svgRef} className="spinner" onClick={bookBed} />
     </div>
   );
 }
