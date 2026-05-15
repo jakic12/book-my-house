@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
-const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+const port = Number.parseInt(process.env.PORT ?? "3001", 10);
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const bookingsFilePath = join(currentDir, "..", "data", "bookings.json");
 
@@ -15,7 +15,7 @@ const wss = new WebSocketServer({ server });
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
@@ -31,9 +31,24 @@ app.use(express.json());
 const readBookings = async () => {
   try {
     const file = await readFile(bookingsFilePath, "utf8");
-    return JSON.parse(file);
+
+    if (!file.trim()) {
+      return [];
+    }
+
+    const bookings = JSON.parse(file);
+
+    if (!Array.isArray(bookings)) {
+      return [];
+    }
+
+    return bookings;
   } catch (error) {
     if (error.code === "ENOENT") {
+      return [];
+    }
+
+    if (error instanceof SyntaxError) {
       return [];
     }
 
@@ -54,6 +69,8 @@ const normalizeName = (body) => {
   return body.name.trim();
 };
 
+const getNameKey = (name) => (typeof name === "string" ? name.trim().toLowerCase() : "");
+
 const createBooking = async (body) => {
   const name = normalizeName(body);
   const bedSlug = typeof body.slug === "string" ? body.slug.trim() : "";
@@ -73,6 +90,17 @@ const createBooking = async (body) => {
   }
 
   const bookings = await readBookings();
+  const nameAlreadyHasBooking = bookings.some(
+    (booking) => getNameKey(booking.name) === getNameKey(name)
+  );
+
+  if (nameAlreadyHasBooking) {
+    return {
+      statusCode: 409,
+      error: "You already booked a bed"
+    };
+  }
+
   const bedIsAlreadyBooked = bookings.some((booking) => booking.bedSlug === bedSlug);
 
   if (bedIsAlreadyBooked) {
@@ -92,6 +120,55 @@ const createBooking = async (body) => {
 
   return {
     statusCode: 201,
+    booking
+  };
+};
+
+const deleteBooking = async (bedSlug, body) => {
+  const name = normalizeName(body);
+  const normalizedBedSlug = typeof bedSlug === "string" ? bedSlug.trim() : "";
+
+  if (!name) {
+    return {
+      statusCode: 400,
+      error: "Name is required"
+    };
+  }
+
+  if (!normalizedBedSlug) {
+    return {
+      statusCode: 400,
+      error: "Bed slug is required"
+    };
+  }
+
+  const bookings = await readBookings();
+  const booking = bookings.find(
+    (currentBooking) => currentBooking.bedSlug === normalizedBedSlug
+  );
+
+  if (!booking) {
+    return {
+      statusCode: 404,
+      error: "Booking was not found"
+    };
+  }
+
+  if (getNameKey(booking.name) !== getNameKey(name)) {
+    return {
+      statusCode: 403,
+      error: "You can only remove your own booking"
+    };
+  }
+
+  const nextBookings = bookings.filter(
+    (currentBooking) => currentBooking.bedSlug !== normalizedBedSlug
+  );
+
+  await saveBookings(nextBookings);
+
+  return {
+    statusCode: 200,
     booking
   };
 };
@@ -146,6 +223,30 @@ app.post("/bookings", async (req, res, next) => {
 
     broadcastSocketMessage({
       type: "booking_created",
+      booking: result.booking
+    });
+
+    res.status(result.statusCode).json({
+      booking: result.booking
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/bookings/:slug", async (req, res, next) => {
+  try {
+    const result = await deleteBooking(req.params.slug, req.body);
+
+    if (result.error) {
+      res.status(result.statusCode).json({
+        error: result.error
+      });
+      return;
+    }
+
+    broadcastSocketMessage({
+      type: "booking_deleted",
       booking: result.booking
     });
 

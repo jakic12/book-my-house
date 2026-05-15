@@ -1,8 +1,11 @@
-import { render, screen } from '@testing-library/react';
-import App from './App';
+import { render, screen } from "@testing-library/react";
+import App from "./App";
 
-test('renders learn react link', () => {
+jest.mock("./hisa.svg", () => ({
+  ReactComponent: () => <svg data-testid="house-map" />,
+}));
+
+test("renders floor controls", () => {
   render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+  expect(screen.getByText(/nadstropje/i)).toBeInTheDocument();
 });

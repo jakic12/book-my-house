@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-The API will be available at `http://localhost:3000`.
+The API will be available at `http://localhost:3001`.
 
 ## Scripts
 
@@ -22,13 +22,14 @@ The API will be available at `http://localhost:3000`.
 - `GET /health` returns a health check.
 - `GET /bookings` returns saved bed bookings.
 - `POST /bookings` saves a bed booking.
+- `DELETE /bookings/:slug` removes a bed booking for the given name.
 
 ## WebSocket
 
 Connect to:
 
 ```text
-ws://localhost:3000
+ws://localhost:3001
 ```
 
 Send this message to book a bed:
@@ -50,7 +51,7 @@ If the bed is free, every connected client receives:
     "name": "Matej",
     "bedSlug": "bed-1"
   }
-}
+}“
 ```
 
 If the bed is already booked, the sender receives:
@@ -76,3 +77,13 @@ Send a booking from the frontend like this:
 
 Bookings are saved locally to `data/bookings.json`.
 The `slug` is treated as the unique bed identifier. Sending another booking with the same `slug` returns a `409` error because that bed is already booked.
+
+Remove a booking from the frontend like this:
+
+```json
+{
+  "name": "Matej"
+}
+```
+
+Send it to `DELETE /bookings/bed-1`. Only the person who booked the bed can remove that booking.
